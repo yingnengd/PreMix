@@ -1,27 +1,23 @@
 -- =========================================================
 -- MCP Auto Mix Engine
--- Responsibility Model (v1.0)
+-- Responsibility Model (v1.1)
 --
--- This module decides *which buses should yield* based on:
---   1. Bus roles (from mcp_roles)
---   2. Offline analysis facts (from Essentia)
---
--- IMPORTANT:
--- - No FX insertion here
--- - No parameter changes here
--- - Pure responsibility scoring
+-- Changes from v1.0:
+-- - Section-aware
+-- - Stability-aware
+-- - Still NO FX / NO automation
 -- =========================================================
 
 local U = require("mcp_utils")
 local R = require("mcp_roles")
+local S = require("mcp_stability")
 
 local M = {}
 
--- ---------------------------------------------------------
--- Responsibility weights (v1.0 frozen philosophy)
--- ---------------------------------------------------------
+------------------------------------------------------------
+-- Role weights (unchanged philosophy)
+------------------------------------------------------------
 
--- Higher value = more likely to be asked to move
 local VOCAL_ROLE_WEIGHT = {
   PAD    = 1.00,
   HARM   = 0.75,
@@ -36,115 +32,74 @@ local MUSIC_ROLE_WEIGHT = {
   FX    = 0.40
 }
 
--- ---------------------------------------------------------
--- Bus pressure models (analysis → 0..1 pressure)
--- ---------------------------------------------------------
+------------------------------------------------------------
+-- Pressure models（与 v1.0 一致）
+------------------------------------------------------------
 
-local function vocal_pressure(analysis)
-  if not analysis then return 0 end
-
-  -- Expected fields (from analyze_bus.py):
-  -- loudness, presence, sibilance, dynamic_complexity
-
-  local loud_f = U.norm(analysis.loudness or -24, -30, -14)
-  local pres_f = U.norm(analysis.presence or 0, 0.2, 0.8)
-  local sib_f  = U.norm(analysis.sibilance or 0, 0.2, 0.8)
-
-  -- Weighted vocal stress model
-  local pressure =
-      loud_f * 0.40 +
-      pres_f  * 0.40 +
-      sib_f   * 0.20
-
-  return U.clamp(pressure, 0, 1)
+local function vocal_pressure(a)
+  if not a then return 0 end
+  return U.clamp(
+    U.norm(a.loudness or -24, -30, -14) * 0.4 +
+    U.norm(a.presence or 0, 0.2, 0.8)   * 0.4 +
+    U.norm(a.sibilance or 0, 0.2, 0.8)  * 0.2,
+    0, 1
+  )
 end
 
-local function music_pressure(analysis)
-  if not analysis then return 0 end
-
-  -- Expected fields:
-  -- low_mid, presence, stereo_spread
-
-  local low_f   = U.norm(analysis.low_mid or 0, 0.3, 0.9)
-  local pres_f  = U.norm(analysis.presence or 0, 0.3, 0.9)
-  local width_f = U.norm(analysis.stereo_spread or 0.2, 0.9)
-
-  local pressure =
-      low_f   * 0.45 +
-      pres_f  * 0.35 +
-      width_f * 0.20
-
-  return U.clamp(pressure, 0, 1)
+local function music_pressure(a)
+  if not a then return 0 end
+  return U.clamp(
+    U.norm(a.low_mid or 0, 0.3, 0.9)    * 0.45 +
+    U.norm(a.presence or 0, 0.3, 0.9)   * 0.35 +
+    U.norm(a.stereo_spread or 0.2, 0.9) * 0.20,
+    0, 1
+  )
 end
 
--- ---------------------------------------------------------
--- Core responsibility scoring
--- ---------------------------------------------------------
+------------------------------------------------------------
+-- Core builders (v1.1)
+------------------------------------------------------------
 
---- Build responsibility list for vocal-related buses
--- @param roles table (from mcp_roles.scan_project)
--- @param analysis table (vocal analysis)
--- @return table list of responsibility entries
+local function build(domain, roles, analysis, pressure_fn, weight_map)
+  local results = {}
+  local pressure = pressure_fn(analysis)
+  if pressure <= 0 then return results end
+
+  local section = _G.MCP_CURRENT_SECTION or "A"
+
+  for _, info in ipairs(roles) do
+    if info.type == domain then
+      local w = weight_map[info.role] or 0
+      if w > 0 then
+        local raw = U.clamp(w * pressure, 0, 1)
+        local stable = S.stabilize(info.track, raw, section)
+
+        table.insert(results, {
+          track        = info.track,
+          name         = info.name,
+          domain       = domain,
+          role         = info.role,
+          raw_score    = raw,
+          stable_score = stable,
+          section      = section
+        })
+      end
+    end
+  end
+
+  table.sort(results, function(a, b)
+    return a.stable_score > b.stable_score
+  end)
+
+  return results
+end
+
 function M.build_vocal(roles, analysis)
-  local results = {}
-  local pressure = vocal_pressure(analysis)
-
-  if pressure <= 0 then return results end
-
-  for _, info in ipairs(roles) do
-    if info.type == "VOCAL" then
-      local weight = VOCAL_ROLE_WEIGHT[info.role] or 0
-      if weight > 0 then
-        local score = U.clamp(weight * pressure, 0, 1)
-        table.insert(results, {
-          track  = info.track,
-          name   = info.name,
-          domain = "VOCAL",
-          role   = info.role,
-          score  = score
-        })
-      end
-    end
-  end
-
-  table.sort(results, function(a, b)
-    return a.score > b.score
-  end)
-
-  return results
+  return build("VOCAL", roles, analysis, vocal_pressure, VOCAL_ROLE_WEIGHT)
 end
 
---- Build responsibility list for music-related buses
--- @param roles table
--- @param analysis table (music analysis)
--- @return table list
 function M.build_music(roles, analysis)
-  local results = {}
-  local pressure = music_pressure(analysis)
-
-  if pressure <= 0 then return results end
-
-  for _, info in ipairs(roles) do
-    if info.type == "MUSIC" then
-      local weight = MUSIC_ROLE_WEIGHT[info.role] or 0
-      if weight > 0 then
-        local score = U.clamp(weight * pressure, 0, 1)
-        table.insert(results, {
-          track  = info.track,
-          name   = info.name,
-          domain = "MUSIC",
-          role   = info.role,
-          score  = score
-        })
-      end
-    end
-  end
-
-  table.sort(results, function(a, b)
-    return a.score > b.score
-  end)
-
-  return results
+  return build("MUSIC", roles, analysis, music_pressure, MUSIC_ROLE_WEIGHT)
 end
 
 return M
