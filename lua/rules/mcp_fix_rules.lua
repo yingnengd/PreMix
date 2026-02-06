@@ -1,160 +1,64 @@
 -- =========================================================
 -- MCP Auto Mix Engine
--- Fix Rules (v1.0)
+-- Fix Rules (v1.1)
 --
--- Translate responsibility score → mix intention
---
--- IMPORTANT:
--- - Plugin agnostic
--- - No FX index
--- - No DAW calls
--- - Semantic mix actions only
+-- Plugin-agnostic
+-- Section-aware
+-- Uses stable_score ONLY
 -- =========================================================
-
-local U = require("engine.mcp_utils")
 
 local M = {}
 
--- ---------------------------------------------------------
--- Thresholds (v1 philosophy)
--- ---------------------------------------------------------
+------------------------------------------------------------
+-- Thresholds
+------------------------------------------------------------
 
-local THRESHOLD = {
-  LOW    = 0.30, -- ignore
-  MEDIUM = 0.55, -- gentle yield
-  HIGH   = 0.75  -- strong yield
+local T = {
+  LOW  = 0.25,
+  MID  = 0.45,
+  HIGH = 0.70
 }
 
--- ---------------------------------------------------------
--- Action builders (pure semantics)
--- ---------------------------------------------------------
+------------------------------------------------------------
+-- Rule evaluation
+------------------------------------------------------------
 
-local function reduce_presence(score)
-  return {
-    action = "reduce_presence",
-    amount = U.clamp(score, 0, 1)
-  }
-end
+function M.evaluate(entry)
+  local s = entry.stable_score
+  local role = entry.role
+  local domain = entry.domain
 
-local function reduce_low_mid(score)
-  return {
-    action = "reduce_low_mid",
-    amount = U.clamp(score * 0.8, 0, 1)
-  }
-end
-
-local function compress_dynamic(score)
-  return {
-    action = "compress_dynamic",
-    amount = U.clamp(score, 0, 1)
-  }
-end
-
-local function narrow_width(score)
-  return {
-    action = "narrow_width",
-    amount = U.clamp(score * 0.7, 0, 1)
-  }
-end
-
--- ---------------------------------------------------------
--- Vocal domain rules
--- ---------------------------------------------------------
-
-local function vocal_rule(entry)
-  local s = entry.score
-  if s < THRESHOLD.MEDIUM then return nil end
-
-  if entry.role == "PAD" then
-    return {
-      reduce_presence(s),
-      narrow_width(s)
-    }
-
-  elseif entry.role == "HARM" then
-    return {
-      reduce_presence(s * 0.8)
-    }
-
-  elseif entry.role == "DOUBLE" then
-    return {
-      compress_dynamic(s * 0.9)
-    }
-
-  elseif entry.role == "FX" then
-    return {
-      reduce_presence(s * 0.6)
-    }
+  if s < T.LOW then
+    return nil
   end
 
-  return nil
-end
-
--- ---------------------------------------------------------
--- Music domain rules
--- ---------------------------------------------------------
-
-local function music_rule(entry)
-  local s = entry.score
-  if s < THRESHOLD.MEDIUM then return nil end
-
-  if entry.role == "LOW" then
-    return {
-      reduce_low_mid(s)
-    }
-
-  elseif entry.role == "MID" then
-    return {
-      reduce_presence(s * 0.8)
-    }
-
-  elseif entry.role == "HIGH" then
-    return {
-      reduce_presence(s * 0.6),
-      narrow_width(s * 0.5)
-    }
-
-  elseif entry.role == "FX" then
-    return {
-      narrow_width(s)
-    }
-  end
-
-  return nil
-end
-
--- ---------------------------------------------------------
--- Public entry
--- ---------------------------------------------------------
-
---- Build fix actions from responsibility list
--- @param responsibilities table (from mcp_responsibility)
--- @return table list of { track, actions[] }
-function M.build(responsibilities)
-  local fixes = {}
-
-  for _, entry in ipairs(responsibilities) do
-    local actions = nil
-
-    if entry.domain == "VOCAL" then
-      actions = vocal_rule(entry)
-    elseif entry.domain == "MUSIC" then
-      actions = music_rule(entry)
+  -- Vocal support tracks yield first
+  if domain == "VOCAL" then
+    if role == "PAD" or role == "HARM" then
+      return {
+        action = "REDUCE_PRESENCE",
+        amount = s
+      }
     end
-
-    if actions and #actions > 0 then
-      table.insert(fixes, {
-        track   = entry.track,
-        name    = entry.name,
-        domain  = entry.domain,
-        role    = entry.role,
-        score   = entry.score,
-        actions = actions
-      })
+    if role == "DOUBLE" then
+      return {
+        action = "TRIM_GAIN",
+        amount = s * 0.6
+      }
     end
   end
 
-  return fixes
+  -- Music buses yield under vocal pressure
+  if domain == "MUSIC" then
+    if role == "MID" or role == "HIGH" then
+      return {
+        action = "DUCK_MID",
+        amount = s
+      }
+    end
+  end
+
+  return nil
 end
 
 return M
