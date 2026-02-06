@@ -1,113 +1,138 @@
 -- =========================================================
 -- MCP Auto Mix Engine
--- FX Apply Engine (v1.0)
+-- Apply FX / Gain Layer (v1.2)
 --
--- Translates semantic mix actions into real plugin parameters
--- using fx_profiles + fx_index_map.
---
--- RULES:
--- - No fades
--- - No envelopes
--- - Plugin-internal control only
+-- Responsibility → Gentle, reversible actions
+-- No automation, no plugin control
 -- =========================================================
 
 local r = reaper
 
-local U       = require("engine.mcp_utils")
-local FXP     = require("fx.fx_profiles")
-local INDEX   = require("fx.fx_index_map")
+local U  = require("mcp_utils")
+local R  = require("mcp_roles")
+local RES = require("mcp_responsibility")
+local SC = require("mcp_sidechain_responsibility")
 
 local M = {}
 
--- ---------------------------------------------------------
--- Internal helpers
--- ---------------------------------------------------------
+------------------------------------------------------------
+-- Config (v1.2 frozen)
+------------------------------------------------------------
 
-local function ensure_fx(track, fx_name)
-  return r.TrackFX_AddByName(track, fx_name, false, 1)
+-- Max trim change (dB)
+local MAX_TRIM_DB = -2.5
+
+-- Section multipliers (来自你已有 section detector)
+local SECTION_GAIN = {
+  A = 0.6,
+  B = 0.8,
+  VERSE = 0.6,
+  PRECHORUS = 0.8,
+  CHORUS = 1.0,
+  FINAL = 1.0
+}
+
+------------------------------------------------------------
+-- Utilities
+------------------------------------------------------------
+
+local function get_section_factor()
+  local sec = _G.MCP_CURRENT_SECTION or "A"
+  return SECTION_GAIN[sec] or 0.6
 end
 
-local function set_param(track, fx, param, value)
-  if fx < 0 then return end
-  r.TrackFX_SetParamNormalized(track, fx, param, U.clamp(value, 0, 1))
+local function apply_track_trim(track, delta_db)
+  if not track then return end
+
+  local vol = r.GetMediaTrackInfo_Value(track, "D_VOL")
+  local vol_db = 20 * math.log(vol, 10)
+
+  local new_db = U.clamp(vol_db + delta_db, -24, 12)
+  local new_vol = 10 ^ (new_db / 20)
+
+  r.SetMediaTrackInfo_Value(track, "D_VOL", new_vol)
 end
 
--- ---------------------------------------------------------
--- Action implementations
--- ---------------------------------------------------------
+------------------------------------------------------------
+-- Apply Vocal Responsibility (一次贴脸 + 汇总保护)
+------------------------------------------------------------
 
-local function apply_reduce_presence(track, amount)
-  local cfg = FXP.get("reduce_presence")
-  if not cfg then return end
+function M.apply_vocal(roles, vocal_analysis)
+  local list = RES.build_vocal(roles, vocal_analysis)
+  if #list == 0 then return end
 
-  local fx = ensure_fx(track, cfg.plugin)
-  local map = INDEX[cfg.plugin]
-  if not map then return end
+  local sec_factor = get_section_factor()
 
-  if cfg.type == "EQ" or cfg.type == "DYN_EQ" then
-    set_param(track, fx, map.BAND_GAIN, 0.5 - amount * 0.2)
+  for _, item in ipairs(list) do
+    local trim_db =
+      item.score * MAX_TRIM_DB * sec_factor
+
+    apply_track_trim(item.track, trim_db)
   end
 end
 
-local function apply_reduce_low_mid(track, amount)
-  local cfg = FXP.get("reduce_low_mid")
-  if not cfg then return end
+------------------------------------------------------------
+-- Apply Sidechain Responsibility (v1.2 核心)
+------------------------------------------------------------
 
-  local fx = ensure_fx(track, cfg.plugin)
-  local map = INDEX[cfg.plugin]
-  if not map then return end
+function M.apply_sidechain(roles, vocal_analysis, music_analysis)
+  if not vocal_analysis or not music_analysis then return end
 
-  set_param(track, fx, map.BAND_GAIN, 0.5 - amount * 0.25)
-end
+  local sec_factor = get_section_factor()
 
-local function apply_compress_dynamic(track, amount)
-  local cfg = FXP.get("compress_dynamic")
-  if not cfg then return end
+  for _, info in ipairs(roles) do
+    if info.type ~= "MUSIC" then goto continue end
 
-  local fx = ensure_fx(track, cfg.plugin)
-  local map = INDEX[cfg.plugin]
-  if not map then return end
+    local duck =
+      SC.compute(vocal_analysis, music_analysis, info.role)
 
-  set_param(track, fx, map.RATIO, amount)
-end
+    if duck >= 0.999 then goto continue end
 
-local function apply_narrow_width(track, amount)
-  local cfg = FXP.get("narrow_width")
-  if not cfg then return end
+    -- convert duck weight to dB trim
+    local duck_db =
+      20 * math.log(duck, 10)
 
-  local fx = ensure_fx(track, cfg.plugin)
-  local map = INDEX[cfg.plugin]
-  if not map then return end
+    local final_db =
+      U.clamp(duck_db * sec_factor, MAX_TRIM_DB, 0)
 
-  set_param(track, fx, map.WIDTH or map.BAND_GAIN, 0.5 - amount * 0.3)
-end
+    apply_track_trim(info.track, final_db)
 
--- ---------------------------------------------------------
--- Dispatcher
--- ---------------------------------------------------------
-
-function M.apply(fixes)
-  for _, fix in ipairs(fixes or {}) do
-    if U.track_has_flag(fix.track, "fx_applied") then goto continue end
-
-    for _, act in ipairs(fix.actions) do
-      if act.action == "reduce_presence" then
-        apply_reduce_presence(fix.track, act.amount)
-
-      elseif act.action == "reduce_low_mid" then
-        apply_reduce_low_mid(fix.track, act.amount)
-
-      elseif act.action == "compress_dynamic" then
-        apply_compress_dynamic(fix.track, act.amount)
-
-      elseif act.action == "narrow_width" then
-        apply_narrow_width(fix.track, act.amount)
-      end
-    end
-
-    U.track_set_flag(fix.track, "fx_applied", true)
     ::continue::
   end
+end
+
+------------------------------------------------------------
+-- Entry (called by auto_engine)
+------------------------------------------------------------
+
+function M.apply(context)
+  -- context = {
+  --   roles,
+  --   analysis = {
+  --     vocal = {},
+  --     music = {}
+  --   }
+  -- }
+
+  if not context or not context.roles then return end
+
+  r.Undo_BeginBlock()
+
+  M.apply_vocal(
+    context.roles,
+    context.analysis and context.analysis.vocal
+  )
+
+  M.apply_sidechain(
+    context.roles,
+    context.analysis and context.analysis.vocal,
+    context.analysis and context.analysis.music
+  )
+
+  r.Undo_EndBlock(
+    "MCP Auto Mix Engine v1.2 – Apply Responsibility",
+    -1
+  )
 end
 
 return M
