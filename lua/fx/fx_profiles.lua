@@ -1,92 +1,117 @@
 -- =========================================================
--- FX Profiles
--- Define WHICH plugins are used for each role & domain
+-- MCP Auto Mix Engine
+-- FX Profiles Matrix (v1.2)
+--
+-- Purpose:
+--   Define WHICH plugin family is used for WHICH responsibility
+--   This file NEVER sets parameter values or indices.
+--
+-- Design rules:
+--   - Plugin-agnostic logic lives elsewhere
+--   - Index mapping lives in fx_index_map.lua
+--   - This file only answers: "use WHAT for WHICH job"
 -- =========================================================
 
 local M = {}
 
--- 当前使用的 Profile（可由 Action / UI 切换）
-M.ACTIVE = "FABFILTER"  -- "REA" | "WAVES" | "FABFILTER"
+------------------------------------------------------------
+-- Active profile selector
+------------------------------------------------------------
 
--- ---------------------------------------------------------
--- Profiles
--- ---------------------------------------------------------
+-- Available profiles:
+--   "REAPER" | "FABFILTER" | "WAVES"
+M.ACTIVE = "FABFILTER"
+
+------------------------------------------------------------
+-- Profile definitions
+------------------------------------------------------------
 
 M.PROFILES = {
 
--- =========================
--- REAPER Native
--- =========================
-REA = {
+-- =========================================================
+-- REAPER Native (Safe / Zero Dependency)
+-- =========================================================
+REAPER = {
   VOCAL = {
-    PRESENT_EQ = "ReaEQ (Cockos)",
-    DYN_EQ     = "ReaXcomp (Cockos)",
-    COMP       = "ReaComp (Cockos)",
-    DEESS      = "ReaXcomp (Cockos)",
-    SAT        = "JS: Saturation"
+    CORE_EQ      = "ReaEQ (Cockos)",
+    SUPPORT_EQ   = "ReaEQ (Cockos)",
+    COMP         = "ReaComp (Cockos)",
+    DEESS        = "ReaXcomp (Cockos)",
+    WIDTH        = "JS: Stereo Width"
   },
 
   MUSIC = {
-    EQ   = "ReaEQ (Cockos)",
-    COMP = "ReaComp (Cockos)",
-    SC   = "ReaComp (Cockos)"
+    BUS_EQ       = "ReaEQ (Cockos)",
+    BUS_COMP     = "ReaComp (Cockos)",
+    WIDTH        = "JS: Stereo Width"
   }
 },
 
--- =========================
--- Waves
--- =========================
-WAVES = {
-  VOCAL = {
-    PRESENT_EQ = "Waves F6 Stereo",
-    DYN_EQ     = "Waves F6 Stereo",
-    COMP       = "Waves R-Comp",
-    DEESS      = "Waves Sibilance",
-    SAT        = "Waves J37"
-  },
-
-  MUSIC = {
-    EQ   = "Waves F6 Stereo",
-    COMP = "Waves R-Comp",
-    SC   = "Waves C6"
-  }
-},
-
--- =========================
--- FabFilter
--- =========================
+-- =========================================================
+-- FabFilter Suite (Modern / Transparent)
+-- =========================================================
 FABFILTER = {
   VOCAL = {
-    PRESENT_EQ = "FabFilter Pro-Q 3",
-    DYN_EQ     = "FabFilter Pro-Q 3",
-    COMP       = "FabFilter Pro-C 2",
-    DEESS      = "FabFilter Pro-DS",
-    SAT        = "FabFilter Saturn 2"
+    CORE_EQ      = "FabFilter Pro-Q 3",
+    SUPPORT_EQ   = "FabFilter Pro-Q 3",
+    COMP         = "FabFilter Pro-C 2",
+    DEESS        = "FabFilter Pro-DS",
+    WIDTH        = "FabFilter Pro-Q 3"
   },
 
   MUSIC = {
-    EQ   = "FabFilter Pro-Q 3",
-    COMP = "FabFilter Pro-C 2",
-    SC   = "FabFilter Pro-Q 3"
+    BUS_EQ       = "FabFilter Pro-Q 3",
+    BUS_COMP     = "FabFilter Pro-C 2",
+    WIDTH        = "FabFilter Pro-Q 3"
+  }
+},
+
+-- =========================================================
+-- Waves Suite (Character / Commercial)
+-- =========================================================
+WAVES = {
+  VOCAL = {
+    CORE_EQ      = "Waves Scheps 73",
+    SUPPORT_EQ   = "Waves F6 Stereo",
+    COMP         = "Waves R-Comp",
+    DEESS        = "Waves Sibilance",
+    WIDTH        = "Waves S1 Stereo Imager"
+  },
+
+  MUSIC = {
+    BUS_EQ       = "Waves F6 Stereo",
+    BUS_COMP     = "Waves R-Comp",
+    WIDTH        = "Waves S1 Stereo Imager"
   }
 }
 
 }
 
--- ---------------------------------------------------------
+------------------------------------------------------------
 -- Helpers
--- ---------------------------------------------------------
+------------------------------------------------------------
 
+--- Get active profile table
 function M.get()
   return M.PROFILES[M.ACTIVE]
 end
 
-function M.set(name)
-  if M.PROFILES[name] then
-    M.ACTIVE = name
+--- Set active profile
+function M.set(profile)
+  if M.PROFILES[profile] then
+    M.ACTIVE = profile
     return true
   end
   return false
+end
+
+--- Get plugin name by domain / role
+-- @param domain string "VOCAL" | "MUSIC"
+-- @param key string (e.g. CORE_EQ, BUS_COMP)
+function M.plugin(domain, key)
+  local p = M.PROFILES[M.ACTIVE]
+  if not p or not p[domain] then return nil end
+  return p[domain][key]
 end
 
 return M
