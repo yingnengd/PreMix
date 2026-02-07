@@ -1,31 +1,16 @@
 -- =========================================================
--- MCP Auto Mix Engine
--- Main Entry (v1.0)
---
--- One-click automatic mix balancing based on responsibility model
---
--- FLOW:
---   1. Scan project roles
---   2. Read offline analysis (JSON)
---   3. Build responsibility lists
---   4. Translate to fix actions
---   5. Apply FX adjustments
+-- MCP Auto Mix Engine v2
+-- Main Entry
 -- =========================================================
 
 local r = reaper
 
-local U    = require("engine.mcp_utils")
-local Role = require("engine.mcp_roles")
-local Ana  = require("engine.mcp_read_analysis")
-local Resp = require("engine.mcp_responsibility")
-local Rule = require("rules.mcp_fix_rules")
-local FX   = require("engine.mcp_apply_fx")
+local RunAna = require("engine.mcp_run_analysis")
+local Read   = require("engine.mcp_read_plan")
+local Apply  = require("engine.mcp_apply_fx")
+local Role   = require("engine.mcp_roles")
 
 local M = {}
-
--- ---------------------------------------------------------
--- Safety checks
--- ---------------------------------------------------------
 
 local function ensure_project()
   if r.CountTracks(0) == 0 then
@@ -35,52 +20,34 @@ local function ensure_project()
   return true
 end
 
--- ---------------------------------------------------------
--- Core execution
--- ---------------------------------------------------------
-
 function M.run()
   if not ensure_project() then return end
 
   r.Undo_BeginBlock()
   r.PreventUIRefresh(1)
 
-  -- 1. Scan roles
+  -- 1️⃣ 扫描轨道角色
   local roles = Role.scan_project()
-  if not roles or #roles == 0 then
-    r.ShowMessageBox("No MCP buses detected", "MCP Auto Mix", 0)
+  if not roles then
+    r.ShowMessageBox("No MCP roles found", "MCP Auto Mix", 0)
     goto finish
   end
 
-  -- 2. Read analysis results
-  local analysis = Ana.read_all()
+  -- 2️⃣ 启动 Python 分析
+  RunAna.run()
 
-  -- 3. Build responsibilities
-  local vocal_resp = Resp.build_vocal(roles, analysis.VOCAL)
-  local music_resp = Resp.build_music(roles, analysis.MUSIC)
-
-  -- Merge lists
-  local responsibilities = {}
-  for _, v in ipairs(vocal_resp) do table.insert(responsibilities, v) end
-  for _, m in ipairs(music_resp) do table.insert(responsibilities, m) end
-
-  if #responsibilities == 0 then
+  -- 3️⃣ 读取修正计划
+  local plan = Read.load()
+  if not plan or not plan.issues then
     goto finish
   end
 
-  -- 4. Build fix actions
-  local fixes = Rule.build(responsibilities)
-
-  if not fixes or #fixes == 0 then
-    goto finish
-  end
-
-  -- 5. Apply FX
-  FX.apply(fixes)
+  -- 4️⃣ 执行修正
+  Apply.apply(plan, roles)
 
   ::finish::
   r.PreventUIRefresh(-1)
-  r.Undo_EndBlock("MCP Auto Mix Engine v1.0", -1)
+  r.Undo_EndBlock("MCP Auto Mix Engine v2", -1)
 end
 
 return M
